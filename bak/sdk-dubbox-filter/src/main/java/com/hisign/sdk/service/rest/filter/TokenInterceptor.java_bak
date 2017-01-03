@@ -1,0 +1,172 @@
+package com.hisign.sdk.service.rest.filter;
+
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
+
+import javax.annotation.Priority;
+import javax.ws.rs.ForbiddenException;
+import javax.ws.rs.Priorities;
+import javax.ws.rs.WebApplicationException;
+import javax.ws.rs.container.ContainerRequestContext;
+import javax.ws.rs.container.ContainerRequestFilter;
+import javax.ws.rs.core.MultivaluedMap;
+import javax.ws.rs.ext.ReaderInterceptor;
+import javax.ws.rs.ext.ReaderInterceptorContext;
+import javax.ws.rs.ext.WriterInterceptor;
+import javax.ws.rs.ext.WriterInterceptorContext;
+
+import net.sf.json.JSONObject;
+
+import org.apache.commons.io.IOUtils;
+import org.jboss.resteasy.core.Headers;
+import org.jboss.resteasy.core.ServerResponse;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.alibaba.dubbo.container.spring.SpringContainer;
+import com.hisign.sdk.common.Constant;
+import com.hisign.sdk.common.util.StringUtils;
+import com.hisign.sso.api.service.sys.TokenService;
+
+/**
+ * TOKEN检查的拦截器
+ * @author chailiangzhi
+ * @date 2015-12-26
+ * 
+ */
+@Priority(Priorities.USER)
+public class TokenInterceptor implements ContainerRequestFilter, ReaderInterceptor, WriterInterceptor {
+
+	/**
+	 * 
+	 */
+	private final Logger logger = LoggerFactory.getLogger(getClass());
+
+	/**
+	 * TOKEN服务
+	 */
+	private TokenService tokenService;
+
+	/**
+	 * 构造函数
+	 */
+	public TokenInterceptor() {
+		//		tokenService = SpringContainer.getContext().getBean(TokenService.class);
+	}
+
+	/* (non-Javadoc)
+	 * @see javax.ws.rs.container.ContainerRequestFilter#filter(javax.ws.rs.container.ContainerRequestContext)
+	 */
+	@Override
+	public void filter(ContainerRequestContext requestContext) throws IOException {
+		// TODO Auto-generated method stub
+
+		String method = requestContext.getMethod();
+		if (method.equalsIgnoreCase("POST")) {
+			logger.info("POST method, dont filter");
+			return;
+		}
+		checkHead(requestContext.getHeaders(), new JSONObject());
+	}
+
+	/**
+	 * 检查HTTP请求头
+	 * @param headerMap
+	 * @return
+	 */
+	private boolean checkHead(MultivaluedMap<String, String> headerMap, JSONObject reqMsgObj) {
+		String systemid = null;
+		String token = null;
+
+		if (headerMap.containsKey("systemid")) {
+			systemid = headerMap.get("systemid").get(0);
+		}
+		if (headerMap.containsKey("token")) {
+			token = headerMap.get("token").get(0);
+		}
+		logger.info("systemid={},token={}", systemid, token);
+
+		int result = this.validateRequest(systemid, token, reqMsgObj);
+		if (result == 0) {
+			return true;
+		} else {
+			Map<String, Object> retEntity = new HashMap<String, Object>();
+			retEntity.put("rspCode", result);
+			retEntity.put("rspDesc", "token检查未通过");
+			ServerResponse serverResponse = new ServerResponse(retEntity,
+					javax.ws.rs.core.Response.Status.FORBIDDEN.getStatusCode(), new Headers<Object>());
+			throw new ForbiddenException("token检查未通过", serverResponse);
+		}
+	}
+
+	/* (non-Javadoc)
+	 * @see javax.ws.rs.ext.ReaderInterceptor#aroundReadFrom(javax.ws.rs.ext.ReaderInterceptorContext)
+	 */
+	@Override
+	public Object aroundReadFrom(ReaderInterceptorContext readerInterceptorContext) throws IOException,
+			WebApplicationException {
+		byte[] buffer = IOUtils.toByteArray(readerInterceptorContext.getInputStream());
+		String reqMsg = new String(buffer, Constant.CHARSET_NAME);
+		logger.info("request body is: \n" + reqMsg + "\n");
+		readerInterceptorContext.setInputStream(new ByteArrayInputStream(buffer));
+
+		JSONObject reqMsgObj = new JSONObject();
+		if (reqMsg.startsWith("{")) {
+			reqMsgObj = JSONObject.fromObject(reqMsg);
+		}
+		checkHead(readerInterceptorContext.getHeaders(), reqMsgObj);
+		return readerInterceptorContext.proceed();
+	}
+
+	/**
+	 * 验证请求
+	 * @param systemid
+	 * @param token
+	 * @return int 
+	 */
+	private int validateRequest(String systemid, String token, JSONObject reqMsgObj) {
+		Object reqHeadObj = reqMsgObj.opt("reqHead");
+		if (reqHeadObj != null) {
+			JSONObject reqHeadJsonObj = JSONObject.fromObject(reqHeadObj);
+			String apiCode = reqHeadJsonObj.optString("apiCode");
+			if ("sys.login".equals(apiCode)) {
+				logger.info("login service, not check token");
+				return 0;
+			}
+		}
+		if (StringUtils.isEmpty(systemid)) {
+			return 1;
+		}
+		if (StringUtils.isEmpty(token)) {
+			return 1;
+		}
+		//TODO  进行权限验证
+		if (tokenService == null) {
+			tokenService = SpringContainer.getContext().getBean(TokenService.class);
+		}
+		String retJsonStr = tokenService.checkToken(token, systemid, null);
+		JSONObject retJsonObj = JSONObject.fromObject(retJsonStr);
+		String rspCode = retJsonObj.get(TokenService.RSP_CODE).toString();
+		if (TokenService.TOKEN_VALID.equals(rspCode)) {
+			return 0;
+		} else {
+			return 1;
+		}
+	}
+
+	/* (non-Javadoc)
+	 * @see javax.ws.rs.ext.WriterInterceptor#aroundWriteTo(javax.ws.rs.ext.WriterInterceptorContext)
+	 */
+	public void aroundWriteTo(WriterInterceptorContext writerInterceptorContext) throws IOException,
+			WebApplicationException {
+		OutputStreamWrapper wrapper = new OutputStreamWrapper(writerInterceptorContext.getOutputStream());
+		// OutputStreamEncryptWrapper
+		writerInterceptorContext.setOutputStream(wrapper);
+		writerInterceptorContext.proceed();
+		String rspMsg = new String(wrapper.getBytes(), "UTF-8");
+		logger.info("rspMsg={}", rspMsg);
+	}
+
+}

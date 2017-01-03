@@ -1,0 +1,1 @@
+auth=com.hisign.dubbo.rpc.protocol.dubbo.filter.AuthFilter
